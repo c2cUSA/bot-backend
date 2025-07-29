@@ -19,6 +19,8 @@ async function startServer() {
         origin: 'http://localhost:3000', // Frontend origin
         credentials: true
     }));
+
+    
     app.use(express.json());
 
     // --- PUBLIC ROUTES ---
@@ -32,11 +34,11 @@ async function startServer() {
     app.use(requireAdmin);
 
     app.get('/api/status', (req, res) => res.json(getBotState()));
-    app.post('/api/start', async (req, res) => {
+    app.post('/api/start-bot', async (req, res) => {
         await startTradingLoop();
         res.json({ message: 'Bot start command issued.' });
     });
-    app.post('/api/stop', (req, res) => {
+    app.post('/api/stop-bot', (req, res) => {
         stopTradingLoop();
         res.json({ message: 'Bot stop command issued.' });
     });
@@ -45,7 +47,7 @@ async function startServer() {
     app.use('/api/users', usersRouter);
 
     // --- SERVER START ---
-    const PORT = parseInt(process.env.PORT || '8080', 10);
+    const PORT = parseInt(process.env.PORT || '8081', 10);
     app.listen(PORT, '0.0.0.0', async () => {
         logger.info(`Backend server is running on http://localhost:${PORT}`);
 
@@ -56,5 +58,4 @@ async function startServer() {
 
 startServer().catch(error => {
     logger.error('Failed to start server:', error);
-    process.exit(1);
 });

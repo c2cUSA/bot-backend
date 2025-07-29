@@ -5,11 +5,14 @@ import logger from './logger';
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
-    logger.error('DATABASE_URL is not set in the environment variables.');
-    process.exit(1);
+    const errorMessage = 'DATABASE_URL is not set in the environment variables.';
+    logger.error(errorMessage);
+    // Throwing an error stops execution and satisfies the type checker.
+    throw new Error(errorMessage);
 }
 
 // Initialize Sequelize
+// TypeScript now knows `databaseUrl` must be a string at this point.
 export const sequelize = new Sequelize(databaseUrl, {
     dialect: 'postgres',
     logging: (msg) => logger.debug(msg), // Use your logger
@@ -58,6 +61,7 @@ export async function connectToDatabase() {
         logger.info('Database synchronized.');
     } catch (error) {
         logger.error('Unable to connect to the database:', error);
-        process.exit(1);
+        // It's better to let the error propagate up to the main server start function
+        throw error;
     }
 }

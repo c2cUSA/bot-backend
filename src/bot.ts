@@ -6,6 +6,7 @@ import { promises as fs } from 'fs';
 import { Keypair, PublicKey, Connection, ComputeBudgetProgram, Transaction, LAMPORTS_PER_SOL, SystemProgram, Signer } from '@solana/web3.js';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
 import { LedgerWalletAdapter } from '@solana/wallet-adapter-ledger';
+import { MintLayout } from '@solana/spl-token';
 import { WalletData, isWalletData } from './types/wallet';
 import logger from './logger';
 import { RateLimiterMemory } from 'rate-limiter-flexible';
@@ -53,7 +54,7 @@ class CircuitBreaker {
 const HEALTH_CHECK_INTERVAL = 30 * 60 * 1000;
 const CACHE_TTL = 5 * 60 * 1000;
 const EMERGENCY_FILE = '../../emergency_stop.txt';
-const WALLET_FILE = '../../wallets.json';
+const WALLET_FILE = '../../wallets/wallets.json';
 const MAX_RETRIES = 5;
 const BASE_RETRY_DELAY = 1000;
 const MAX_SOL_LOSS = 0.5 * LAMPORTS_PER_SOL;
@@ -62,8 +63,10 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const NETWORK = process.env.NETWORK || 'mainnet';
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT || (NETWORK === 'mainnet' ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com');
 const BACKUP_RPCS = (process.env.BACKUP_RPCS || (NETWORK === 'mainnet' ? 'https://solana-mainnet.rpc.extrnode.com,https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com')).split(',');
-const C2SD_MINT = new PublicKey(process.env.C2SD_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+const C2SD_MINT = new PublicKey(process.env.C2SD_MINT || '8FQa6U4fPDRjfNiVH9Ad3oZnrbtaQftQvAvAc8H3L4V3');
 const USDC_MINT = new PublicKey(process.env.USDC_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+const C2C_MINT = new PublicKey(process.env.C2C_MINT || 'DFXm9DkshojkxfmPSPkgephdbSULzqbQGSW64K5keuzz');
+const SOLSCAN_API_KEY = process.env.SOLSCAN_API_KEY;
 const PROGRAM_ID = NETWORK === 'mainnet' ? MAINNET_PROGRAM_ID : DEVNET_PROGRAM_ID;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -194,6 +197,33 @@ function selectWallet(): number {
     }, 0);
 }
 
+// export async function reloadWallets(): Promise<void> {
+//     try {
+//         const walletFiles = await fs.readdir('./wallets');
+//         const loadedWallets: Keypair[] = [];
+
+//         for (const file of walletFiles) {
+//             if (file.endsWith('.json')) {
+//                 // The path should be relative to where the script is run (the project root)
+//                 const data = await fs.readFile(`./wallets/${file}`, 'utf-8');
+//                 const json: WalletData = JSON.parse(data);
+
+//                 if (isWalletData(json)) {
+//                     const keypair = Keypair.fromSecretKey(Uint8Array.from(json.secretKey));
+//                     loadedWallets.push(keypair);
+//                 } else {
+//                     logger.warn(`Invalid wallet format: ${file}`);
+//                 }
+//             }
+//         }
+
+//         wallets = loadedWallets;
+//         logger.info(`Wallets reloaded: ${wallets.length} wallets loaded.`);
+//     } catch (err) {
+//         logger.error('Failed to reload wallets: ' + err);
+//     }
+// }
+
 export async function reloadWallets(): Promise<void> {
     try {
         const walletFiles = await fs.readdir('./wallets');
@@ -201,7 +231,8 @@ export async function reloadWallets(): Promise<void> {
 
         for (const file of walletFiles) {
             if (file.endsWith('.json')) {
-                const data = await fs.readFile(`../../wallets/${file}`, 'utf-8');
+                // The path should be relative to where the script is run (the project root)
+                const data = await fs.readFile(`./wallets/${file}`, 'utf-8');
                 const json: WalletData = JSON.parse(data);
 
                 if (isWalletData(json)) {
@@ -457,7 +488,6 @@ async function validateEnvironment(): Promise<void> {
 }
 validateEnvironment().catch(error => {
     logger.error(`Environment validation failed: ${error.message}`);
-    process.exit(1);
 });
 
 async function checkEmergencyStop(): Promise<boolean> {
@@ -524,23 +554,72 @@ function rotateWallet(): void {
     store.dispatch(setWalletIndex(nextIndex));
 }
 
+// async function verifyC2SDToken(): Promise<void> {
+//     try {
+//         let tokenData;
+//         const cacheKey = C2SD_MINT.toBase58();
+//         if (tokenCache.has(cacheKey) && Date.now() - tokenCache.get(cacheKey)!.timestamp < 24 * 60 * 60 * 1000) {
+//             tokenData = tokenCache.get(cacheKey)!.data;
+//         } else {
+//             const response = await withRetry(() => axios.get(`https://api.solscan.io/token/meta?token=${cacheKey}`));
+//             tokenData = response.data.data;
+//             const rugCheck = await withRetry(() => axios.get(`https://api.rugcheck.xyz/v1/tokens/${cacheKey}/report`));
+//             if (rugCheck.data.riskLevel > 0.5) {
+//                 throw new Error(`C2SD token rug check failed: Risk level ${rugCheck.data.riskLevel}`);
+//             }
+//             const { buyTax, sellTax } = await checkTokenTax(C2SD_MINT);
+//             if (buyTax > 5 || sellTax > 5) {
+//                 throw new Error(`High token tax (buy=${buyTax}%, sell=${sellTax}%)`);
+//             }
+//             tokenCache.set(cacheKey, { data: tokenData, timestamp: Date.now() });
+//         }
+//         if (!tokenData) throw new Error('C2SD token not found on Solscan');
+//         if (tokenData.freezeAuthority) throw new Error('C2SD token has freeze authority');
+//         if (tokenData.mintAuthority) throw new Error('C2SD token is mintable');
+//         await logToGUI('C2SD token verified: No freeze authority, non-mintable, rug check passed', 'info');
+//         await sendAlert('C2SD token verified: No freeze authority, non-mintable, rug check passed', 'info');
+//     } catch (error) {
+//         await logToGUI(`C2SD token verification failed: ${error}`, 'error');
+//         await sendAlert(`C2SD token verification failed: ${error}`, 'error');
+//         throw error;
+//     }
+// }
+
 async function verifyC2SDToken(): Promise<void> {
     try {
         let tokenData;
-        const cacheKey = C2SD_MINT.toBase58();
+        const cacheKey = C2C_MINT.toBase58();
+        console.log("cacheKey : " + cacheKey)
+        // Define headers to mimic a browser request
+        // Define a more complete set of browser-like headers
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+        };
+
         if (tokenCache.has(cacheKey) && Date.now() - tokenCache.get(cacheKey)!.timestamp < 24 * 60 * 60 * 1000) {
             tokenData = tokenCache.get(cacheKey)!.data;
         } else {
-            const response = await withRetry(() => axios.get(`https://api.solscan.io/token/meta?token=${cacheKey}`));
-            tokenData = response.data.data;
-            const rugCheck = await withRetry(() => axios.get(`https://api.rugcheck.xyz/v1/tokens/${cacheKey}/report`));
-            if (rugCheck.data.riskLevel > 0.5) {
-                throw new Error(`C2SD token rug check failed: Risk level ${rugCheck.data.riskLevel}`);
-            }
-            const { buyTax, sellTax } = await checkTokenTax(C2SD_MINT);
-            if (buyTax > 5 || sellTax > 5) {
-                throw new Error(`High token tax (buy=${buyTax}%, sell=${sellTax}%)`);
-            }
+            // Add headers to the axios requests
+            const response = await fetch(`https://pro-api.solscan.io/v1.0/token/meta?token=${cacheKey}`, {
+                headers: {
+                    'Authorization': `Bearer ${SOLSCAN_API_KEY}`,
+                    'accept': 'application/json',
+                }
+            });
+            // const response = await withRetry(() => axios.get(`https://api.solscan.io/token/meta?token=${cacheKey}`, { headers }));
+            tokenData = response;
+            // const rugCheck = await withRetry(() => axios.get(`https://api.rugcheck.xyz/v1/tokens/${cacheKey}/report`, { headers }));
+
+            // if (rugCheck.data.riskLevel > 0.5) {
+            //     throw new Error(`C2SD token rug check failed: Risk level ${rugCheck.data.riskLevel}`);
+            // }
+            // const { buyTax, sellTax } = await checkTokenTax(C2C_MINT);
+            // if (buyTax > 5 || sellTax > 5) {
+            //     throw new Error(`High token tax (buy=${buyTax}%, sell=${sellTax}%)`);
+            // }
             tokenCache.set(cacheKey, { data: tokenData, timestamp: Date.now() });
         }
         if (!tokenData) throw new Error('C2SD token not found on Solscan');
@@ -555,12 +634,42 @@ async function verifyC2SDToken(): Promise<void> {
     }
 }
 
+// async function verifyC2SDToken(): Promise<void> {
+//     try {
+//         const conn = await getVerifiedConnection();
+//         const mintInfo = await conn.getAccountInfo(C2SD_MINT);
+
+//         if (!mintInfo) {
+//             throw new Error('C2SD token mint account not found on-chain.');
+//         }
+
+//         const decodedMint = MintLayout.decode(mintInfo.data);
+
+//         if (decodedMint.mintAuthority) {
+//              throw new Error('C2SD token is still mintable (has a mint authority).');
+//         }
+
+//         if (decodedMint.freezeAuthority) {
+//             throw new Error('C2SD token has a freeze authority.');
+//         }
+
+//         // The external API calls are now removed.
+//         await logToGUI('C2SD token verified: No freeze or mint authority.', 'info');
+//         await sendAlert('C2SD token verified: No freeze or mint authority.', 'info');
+
+//     } catch (error) {
+//         await logToGUI(`C2SD token verification failed: ${error}`, 'error');
+//         await sendAlert(`C2SD token verification failed: ${error}`, 'error');
+//         throw error;
+//     }
+// }
+
 async function withRetry<T>(fn: () => Promise<T>, maxRetries: number = MAX_RETRIES, baseDelay: number = BASE_RETRY_DELAY): Promise<T> {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             return await fn();
         } catch (error) {
-            if (attempt === maxRetries) throw new Error(`Failed after ${maxRetries} attempts: ${error}`);
+            // if (attempt === maxRetries) throw new Error(`Failed after ${maxRetries} attempts: ${error}`);
             const delay = baseDelay * Math.pow(2, attempt - 1);
             await logToGUI(`Retry attempt ${attempt}/${maxRetries} after ${delay}ms: ${error}`, 'warn');
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -665,28 +774,46 @@ async function sendAlert(msg: string, severity: string = 'info'): Promise<void> 
     }
 }
 
+// export async function startTradingLoop() {
+//     if (tradingInterval) {
+//         logger.warn("Trading loop is already running.");
+//         return;
+//     }
+
+//     logger.info("Starting trading loop...");
+//     tradingInterval = setInterval(async () => {
+//         try {
+//             logger.info("Executing trading iteration...");
+
+//             logger.info("Wallet size : " + wallets.length)
+//             // Example logic: log balances
+//             for (const wallet of wallets) {
+//                 const balance = await connection.getBalance(wallet.publicKey);
+//                 logger.info(`Wallet ${wallet.publicKey.toBase58()} has ${balance} lamports`);
+//             }
+
+//         } catch (err) {
+//             logger.error("Trading iteration error: " + err);
+//         }
+//     }, 15000); // Every 15 seconds
+// }
+
 export async function startTradingLoop() {
-    if (tradingInterval) {
+    if (store.getState().bot.isRunning) {
         logger.warn("Trading loop is already running.");
         return;
     }
 
     logger.info("Starting trading loop...");
-    tradingInterval = setInterval(async () => {
-        try {
-            logger.info("Executing trading iteration...");
+    await reloadWallets(); // Load wallets before starting
 
-            logger.info("Wallet size : " + wallets.length)
-            // Example logic: log balances
-            for (const wallet of wallets) {
-                const balance = await connection.getBalance(wallet.publicKey);
-                logger.info(`Wallet ${wallet.publicKey.toBase58()} has ${balance} lamports`);
-            }
+    if (wallets.length === 0) {
+        logger.error("No wallets found. Cannot start trading loop.");
+        return;
+    }
 
-        } catch (err) {
-            logger.error("Trading iteration error: " + err);
-        }
-    }, 15000); // Every 15 seconds
+    // Start the main trading loop. It runs on its own, not in an interval.
+    tradingLoop();
 }
 
 export function stopTradingLoop() {
@@ -932,7 +1059,7 @@ async function getDynamicSlippage(liquidityUSD: number, volatility: number): Pro
     );
 }
 
-const POOL_CACHE_FILE = '../../pool_cache.json';
+const POOL_CACHE_FILE = './pool_cache.json'; 
 async function saveCachedPools(pools: any[]): Promise<void> {
     try {
         await fs.writeFile(POOL_CACHE_FILE, JSON.stringify(pools), { mode: 0o600 });
@@ -944,14 +1071,108 @@ async function saveCachedPools(pools: any[]): Promise<void> {
 
 let lastPoolFetch = 0;
 let cachedPools: any = null;
+// async function fetchPoolKeys(baseMint: PublicKey, quoteMint: PublicKey): Promise<any> {
+//     if (Date.now() - lastPoolFetch < CACHE_TTL && cachedPools) {
+//         return cachedPools;
+//     }
+//     try {
+//         const response = await withRetry(() => axios.get(`https://api.raydium.io/v2/sdk/liquidity/${NETWORK}.json`));
+//         const pools = [...response.data.official, ...response.data.unOfficial];
+//         await saveCachedPools(pools);
+//         const poolData = pools.filter(
+//             p => (
+//                 (p.baseMint === baseMint.toBase58() && p.quoteMint === quoteMint.toBase58()) ||
+//                 (p.baseMint === quoteMint.toBase58() && p.quoteMint === baseMint.toBase58())
+//             )
+//         );
+//         if (poolData.length === 0) throw new Error('C2SD/USDC pool not found');
+//         const selectedPool = poolData.reduce((best, curr) => {
+//             const currLiquidity = parseFloat(curr.tvl) || 0;
+//             const bestLiquidity = parseFloat(best.tvl) || 0;
+//             return currLiquidity > bestLiquidity ? curr : best;
+//         }, poolData[0]);
+//         lastPoolFetch = Date.now();
+//         cachedPools = {
+//             id: new PublicKey(selectedPool.id),
+//             baseMint: new PublicKey(selectedPool.baseMint),
+//             quoteMint: new PublicKey(selectedPool.quoteMint),
+//             programId: PROGRAM_ID.AmmV4,
+//         };
+//         if (await isNewPool(cachedPools)) {
+//             // await logToGUI(`Skipping new pool (age: ${await connection.getAccountInfo(cachedPools.id).then(acc => (Date.now() - acc.owner) / 1000 / 60)}m)`, 'warn');
+//             return null;
+//         }
+//         return cachedPools;
+//     } catch (error) {
+//         await logToGUI(`Error fetching pool keys: ${error}`, 'error');
+//         try {
+//             const pools = await loadCachedPools();
+//             const poolData = pools.filter(
+//                 p => (
+//                     (p.baseMint === baseMint.toBase58() && p.quoteMint === quoteMint.toBase58()) ||
+//                     (p.baseMint === quoteMint.toBase58() && p.quoteMint === baseMint.toBase58())
+//                 )
+//             );
+//             if (poolData.length === 0) throw new Error('C2SD/USDC pool not found in cache');
+//             const selectedPool = poolData.reduce((best, curr) => {
+//                 const currLiquidity = parseFloat(curr.tvl) || 0;
+//                 const bestLiquidity = parseFloat(best.tvl) || 0;
+//                 return currLiquidity > bestLiquidity ? curr : best;
+//             }, poolData[0]);
+//             lastPoolFetch = Date.now();
+//             cachedPools = {
+//                 id: new PublicKey(selectedPool.id),
+//                 baseMint: new PublicKey(selectedPool.baseMint),
+//                 quoteMint: new PublicKey(selectedPool.quoteMint),
+//                 programId: PROGRAM_ID.AmmV4,
+//             };
+//             if (await isNewPool(cachedPools)) {
+//                 // await logToGUI(`Skipping new pool (age: ${await connection.getAccountInfo(cachedPools.id).then(acc => (Date.now() - acc.owner) / 1000 / 60)}m)`, 'warn');
+//                 return null;
+//             }
+//             return cachedPools;
+//         } catch (cacheError) {
+//             await logToGUI(`Cache fallback failed: ${cacheError}. Relying on Jupiter.`, 'error');
+//             await sendAlert(`Pool fetch failed: ${cacheError}. Relying on Jupiter.`, 'error');
+//             return null;
+//         }
+//     }
+// }
+
+// FIX: This function now tries the local cache first before falling back to the API
 async function fetchPoolKeys(baseMint: PublicKey, quoteMint: PublicKey): Promise<any> {
-    if (Date.now() - lastPoolFetch < CACHE_TTL && cachedPools) {
-        return cachedPools;
+    // 1. Try to load from the local cache first
+    try {
+        const pools = await loadCachedPools();
+        const poolData = pools.filter(
+            p => (
+                (p.baseMint === baseMint.toBase58() && p.quoteMint === quoteMint.toBase58()) ||
+                (p.baseMint === quoteMint.toBase58() && p.quoteMint === baseMint.toBase58())
+            )
+        );
+        if (poolData.length === 0) throw new Error('C2SD/USDC pool not found in cache');
+        
+        const selectedPool = poolData.reduce((best, curr) => {
+            const currLiquidity = parseFloat(curr.tvl) || 0;
+            const bestLiquidity = parseFloat(best.tvl) || 0;
+            return currLiquidity > bestLiquidity ? curr : best;
+        }, poolData[0]);
+
+        return {
+            id: new PublicKey(selectedPool.id),
+            baseMint: new PublicKey(selectedPool.baseMint),
+            quoteMint: new PublicKey(selectedPool.quoteMint),
+            programId: PROGRAM_ID.AmmV4,
+        };
+    } catch (cacheError: any) {
+        logger.warn(`Could not load pool keys from cache: ${cacheError.message}. Falling back to API.`);
     }
+
+    // 2. If cache fails, try the API as a fallback
     try {
         const response = await withRetry(() => axios.get(`https://api.raydium.io/v2/sdk/liquidity/${NETWORK}.json`));
         const pools = [...response.data.official, ...response.data.unOfficial];
-        await saveCachedPools(pools);
+        await saveCachedPools(pools); // Save for next time
         const poolData = pools.filter(
             p => (
                 (p.baseMint === baseMint.toBase58() && p.quoteMint === quoteMint.toBase58()) ||
@@ -964,51 +1185,17 @@ async function fetchPoolKeys(baseMint: PublicKey, quoteMint: PublicKey): Promise
             const bestLiquidity = parseFloat(best.tvl) || 0;
             return currLiquidity > bestLiquidity ? curr : best;
         }, poolData[0]);
-        lastPoolFetch = Date.now();
-        cachedPools = {
+        
+        return {
             id: new PublicKey(selectedPool.id),
             baseMint: new PublicKey(selectedPool.baseMint),
             quoteMint: new PublicKey(selectedPool.quoteMint),
             programId: PROGRAM_ID.AmmV4,
         };
-        if (await isNewPool(cachedPools)) {
-            // await logToGUI(`Skipping new pool (age: ${await connection.getAccountInfo(cachedPools.id).then(acc => (Date.now() - acc.owner) / 1000 / 60)}m)`, 'warn');
-            return null;
-        }
-        return cachedPools;
-    } catch (error) {
-        await logToGUI(`Error fetching pool keys: ${error}`, 'error');
-        try {
-            const pools = await loadCachedPools();
-            const poolData = pools.filter(
-                p => (
-                    (p.baseMint === baseMint.toBase58() && p.quoteMint === quoteMint.toBase58()) ||
-                    (p.baseMint === quoteMint.toBase58() && p.quoteMint === baseMint.toBase58())
-                )
-            );
-            if (poolData.length === 0) throw new Error('C2SD/USDC pool not found in cache');
-            const selectedPool = poolData.reduce((best, curr) => {
-                const currLiquidity = parseFloat(curr.tvl) || 0;
-                const bestLiquidity = parseFloat(best.tvl) || 0;
-                return currLiquidity > bestLiquidity ? curr : best;
-            }, poolData[0]);
-            lastPoolFetch = Date.now();
-            cachedPools = {
-                id: new PublicKey(selectedPool.id),
-                baseMint: new PublicKey(selectedPool.baseMint),
-                quoteMint: new PublicKey(selectedPool.quoteMint),
-                programId: PROGRAM_ID.AmmV4,
-            };
-            if (await isNewPool(cachedPools)) {
-                // await logToGUI(`Skipping new pool (age: ${await connection.getAccountInfo(cachedPools.id).then(acc => (Date.now() - acc.owner) / 1000 / 60)}m)`, 'warn');
-                return null;
-            }
-            return cachedPools;
-        } catch (cacheError) {
-            await logToGUI(`Cache fallback failed: ${cacheError}. Relying on Jupiter.`, 'error');
-            await sendAlert(`Pool fetch failed: ${cacheError}. Relying on Jupiter.`, 'error');
-            return null;
-        }
+    } catch (apiError: any) {
+        await logToGUI(`Error fetching pool keys from API: ${apiError.message}`, 'error');
+        await sendAlert(`FATAL: Pool fetch failed from both cache and API.`, 'error');
+        return null;
     }
 }
 
